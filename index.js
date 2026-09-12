@@ -72,7 +72,7 @@ app.all('/eitaa/*', async (req, res) => {
   }
 });
 
-// ۳. موتور واتساپ با پروکسی سرور خارج و کنترل ریکانکت
+// ۳. موتور واتساپ با پروکسی پورت 8443 و کنترل ریکانکت
 let waSocket = null;
 let isConnected = false;
 let reconnectTimer = null;
@@ -87,8 +87,8 @@ async function startWhatsApp() {
   const { state, saveCreds } = await useMultiFileAuthState(authFolder);
   const { version } = await fetchLatestBaileysVersion().catch(() => ({ version: [2, 3000, 1015901307] }));
 
-  // عبور ترافیک واتساپ از پروکسی سرور خارج (31.58.179.16)
-  const proxyAgent = new HttpsProxyAgent('http://31.58.179.16:8888');
+  // عبور ترافیک واتساپ از پورت 8443 سرور خارج
+  const proxyAgent = new HttpsProxyAgent('http://31.58.179.16:8443');
 
   waSocket = makeWASocket({
     version,
@@ -127,7 +127,7 @@ async function startWhatsApp() {
           startWhatsApp();
         }, 6000);
       } else {
-        console.log('[WhatsApp] سشن کاربری منقضی شد (Logged Out). پوشه auth_whatsapp باید ریست شود.');
+        console.log('[WhatsApp] نشست کاربری منقضی شد (Logged Out). پوشه auth_whatsapp باید ریست شود.');
       }
     } else if (connection === 'open') {
       isConnected = true;
