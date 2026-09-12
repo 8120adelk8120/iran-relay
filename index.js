@@ -6,6 +6,7 @@ const fs = require('fs');
 const axios = require('axios');
 const pino = require('pino');
 const qrcode = require('qrcode-terminal');
+const { HttpsProxyAgent } = require('https-proxy-agent');
 const { 
   default: makeWASocket, 
   useMultiFileAuthState, 
@@ -71,7 +72,7 @@ app.all('/eitaa/*', async (req, res) => {
   }
 });
 
-// ۳. موتور واتساپ با کنترل حلقه ریکانکت و لاگ خطا
+// ۳. موتور واتساپ با پروکسی سرور خارج و کنترل ریکانکت
 let waSocket = null;
 let isConnected = false;
 let reconnectTimer = null;
@@ -86,9 +87,13 @@ async function startWhatsApp() {
   const { state, saveCreds } = await useMultiFileAuthState(authFolder);
   const { version } = await fetchLatestBaileysVersion().catch(() => ({ version: [2, 3000, 1015901307] }));
 
+  // عبور ترافیک واتساپ از پروکسی سرور خارج (31.58.179.16)
+  const proxyAgent = new HttpsProxyAgent('http://31.58.179.16:8888');
+
   waSocket = makeWASocket({
     version,
     auth: state,
+    agent: proxyAgent,
     logger: pino({ level: 'silent' }),
     printQRInTerminal: false,
     connectTimeoutMs: 60000,
@@ -122,7 +127,7 @@ async function startWhatsApp() {
           startWhatsApp();
         }, 6000);
       } else {
-        console.log('[WhatsApp] نشست کاربر منقضی شده است (Logged Out). پوشه auth_whatsapp باید ریست شود.');
+        console.log('[WhatsApp] سشن کاربری منقضی شد (Logged Out). پوشه auth_whatsapp باید ریست شود.');
       }
     } else if (connection === 'open') {
       isConnected = true;
@@ -133,7 +138,7 @@ async function startWhatsApp() {
 
 startWhatsApp();
 
-// ۴. اندپوینت ارسال پیام و مدیا در واتساپ
+// ۴. اندپوینت اختصاصی ارسال پیام و مدیا در واتساپ
 app.post('/whatsapp/send', async (req, res) => {
   if (!isConnected || !waSocket) {
     return res.status(503).json({ 
