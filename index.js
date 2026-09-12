@@ -1,131 +1,147 @@
 const express = require('express');
-const axios = require('axios');
+const cors = require('cors');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const axios = require('axios');
+const pino = require('pino');
+const qrcode = require('qrcode-terminal');
+const { 
+  default: makeWASocket, 
+  useMultiFileAuthState, 
+  DisconnectReason, 
+  fetchLatestBaileysVersion 
+} = require('@whiskeysockets/baileys');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+app.use(cors());
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
-
-// ۱. مدیریت پوشه ذخیره فایل‌ها
+// ۱. مدیریت فایل‌های آپلودی
 const uploadDir = path.join(__dirname, 'uploads');
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
-}
+if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
 
-// ۲. تنظیمات Multer
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, uploadDir),
   filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname) || '';
-    const uniqueName = `${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`;
-    cb(null, uniqueName);
+    const ext = path.extname(file.originalname);
+    const name = `${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`;
+    cb(null, name);
   }
 });
+const upload = multer({ storage });
 
-const upload = multer({
-  storage,
-  limits: { fileSize: 200 * 1024 * 1024 }
-});
-
-// ۳. مسیر استاتیک دانلود فایل‌ها
 app.use('/uploads', express.static(uploadDir));
 
-// ۴. اندپوینت آپلود
-app.post('/upload', upload.any(), (req, res) => {
-  const uploadedFile = req.files && req.files.length > 0 ? req.files[0] : req.file;
-  if (!uploadedFile) {
-    return res.status(400).json({ error: 'هیچ فایلی دریافت نشد' });
-  }
-  const fileUrl = `https://relay.jetback.shop/uploads/${uploadedFile.filename}`;
-  res.json({ url: fileUrl });
+app.post('/upload', upload.single('file'), (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+  const fullUrl = `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}`;
+  res.json({ url: fullUrl, filename: req.file.filename });
 });
 
-// ۵. رله پیام‌رسان بله
+// ۲. رله پیام‌رسان‌های بله و ایتا
 app.all('/bale/*', async (req, res) => {
   try {
     const targetPath = req.params[0];
-    const targetUrl = `https://tapi.bale.ai/${targetPath}`;
     const response = await axios({
       method: req.method,
-      url: targetUrl,
+      url: `https://tapi.bale.ai/${targetPath}`,
       data: req.body,
-      headers: { 'Content-Type': 'application/json' },
-      timeout: 60000
+      params: req.query
     });
     res.status(response.status).json(response.data);
-  } catch (error) {
-    res.status(error.response?.status || 500).json(error.response?.data || { error: error.message });
+  } catch (err) {
+    res.status(err.response?.status || 500).json(err.response?.data || { error: err.message });
   }
 });
 
-// ۶. رله هوشمند ایتا (تبدیل خودکار لینک عکس و ویدیو به فایل واقعی)
 app.all('/eitaa/*', async (req, res) => {
   try {
     const targetPath = req.params[0];
-    const targetUrl = `https://eitaayar.ir/${targetPath}`;
-
-    // اگر درخواست ارسال فایل باشد و لینک فایل فرستاده شده باشد
-    if (targetPath.endsWith('sendFile') && req.body && req.body.file) {
-      const fileSource = req.body.file;
-      let fileBuffer;
-      let fileName = 'media_file.jpg';
-
-      // بررسی وجود فایل در هاست محلی سرور
-      if (typeof fileSource === 'string' && fileSource.includes('/uploads/')) {
-        const localFileName = path.basename(fileSource.split('?')[0]);
-        const localPath = path.join(uploadDir, localFileName);
-        if (fs.existsSync(localPath)) {
-          fileBuffer = fs.readFileSync(localPath);
-          fileName = localFileName;
-        }
-      }
-
-      // دانلود در صورت قرار داشتن فایل روی هاست خارجی
-      if (!fileBuffer) {
-        const fileRes = await axios.get(fileSource, { responseType: 'arraybuffer' });
-        fileBuffer = Buffer.from(fileRes.data);
-        fileName = path.basename(fileSource.split('?')[0]) || 'media_file.jpg';
-      }
-
-      // بسته‌بندی فایل به صورت فرم Multipart واقعی برای سرور ایتا
-      const formData = new FormData();
-      formData.append('chat_id', req.body.chat_id);
-      if (req.body.caption) formData.append('caption', req.body.caption.slice(0, 1200));
-
-      const blob = new Blob([fileBuffer]);
-      formData.append('file', blob, fileName);
-
-      const response = await fetch(targetUrl, {
-        method: 'POST',
-        body: formData
-      });
-
-      const data = await response.json();
-      return res.status(response.status).json(data);
-    }
-
-    // درخواست‌های معمولی مثل sendMessage
     const response = await axios({
       method: req.method,
-      url: targetUrl,
+      url: `https://eitaayar.ir/${targetPath}`,
       data: req.body,
-      headers: { 'Content-Type': 'application/json' },
-      timeout: 60000
+      params: req.query
     });
     res.status(response.status).json(response.data);
-  } catch (error) {
-    res.status(error.response?.status || 500).json(error.response?.data || { error: error.message });
+  } catch (err) {
+    res.status(err.response?.status || 500).json(err.response?.data || { error: err.message });
   }
 });
 
-app.get('/', (req, res) => {
-  res.send('Relay & Media Storage Server is Running.');
+// ۳. موتور اختصاصی واتساپ (Baileys)
+let waSocket = null;
+let isConnected = false;
+
+async function startWhatsApp() {
+  const authFolder = path.join(__dirname, 'auth_whatsapp');
+  const { state, saveCreds } = await useMultiFileAuthState(authFolder);
+  const { version } = await fetchLatestBaileysVersion();
+
+  waSocket = makeWASocket({
+    version,
+    auth: state,
+    logger: pino({ level: 'silent' }),
+    printQRInTerminal: false
+  });
+
+  waSocket.ev.on('creds.update', saveCreds);
+
+  waSocket.ev.on('connection.update', (update) => {
+    const { connection, lastDisconnect, qr } = update;
+
+    if (qr) {
+      console.log('\n================ QR CODE WHATSAPP ================');
+      qrcode.generate(qr, { small: true });
+      console.log('لطفاً بارکد بالا را با واتساپ گوشی اسکن کنید');
+      console.log('===================================================\n');
+    }
+
+    if (connection === 'close') {
+      isConnected = false;
+      const statusCode = lastDisconnect?.error?.output?.statusCode;
+      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+      console.log(`اتصال واتساپ قطع شد. تلاش مجدد: ${shouldReconnect}`);
+      if (shouldReconnect) startWhatsApp();
+    } else if (connection === 'open') {
+      isConnected = true;
+      console.log('واتساپ با موفقیت متصل شد و آماده ارسال پیام است.');
+    }
+  });
+}
+
+startWhatsApp();
+
+// ۴. اندپوینت اختصاصی ارسال پیام و مدیا در واتساپ
+app.post('/whatsapp/send', async (req, res) => {
+  if (!isConnected || !waSocket) {
+    return res.status(503).json({ error: 'WhatsApp is not connected yet. Check server logs for QR code.' });
+  }
+
+  try {
+    let { number, text, mediaUrl, mediaType, caption } = req.body;
+    if (!number) return res.status(400).json({ error: 'Field "number" is required' });
+
+    let jid = number.includes('@') ? number : `${number.replace(/[^0-9]/g, '')}@s.whatsapp.net`;
+    let result;
+
+    if (mediaUrl) {
+      if (mediaType === 'video') {
+        result = await waSocket.sendMessage(jid, { video: { url: mediaUrl }, caption: caption || text || '' });
+      } else {
+        result = await waSocket.sendMessage(jid, { image: { url: mediaUrl }, caption: caption || text || '' });
+      }
+    } else {
+      result = await waSocket.sendMessage(jid, { text: text || '' });
+    }
+
+    res.json({ success: true, messageId: result.key.id });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Server is running on port ${PORT}`);
-});
+const PORT = process.env.PORT || 8080;
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
