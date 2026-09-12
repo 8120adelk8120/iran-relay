@@ -18,7 +18,7 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// ۱. مدیریت فایل‌های آپلودی
+// ۱. مدیریت آپلود و سرو فایل‌ها
 const uploadDir = path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
 
@@ -71,20 +71,29 @@ app.all('/eitaa/*', async (req, res) => {
   }
 });
 
-// ۳. موتور اختصاصی واتساپ (Baileys)
+// ۳. موتور واتساپ با کنترل حلقه ریکانکت و لاگ خطا
 let waSocket = null;
 let isConnected = false;
+let reconnectTimer = null;
 
 async function startWhatsApp() {
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+
   const authFolder = path.join(__dirname, 'auth_whatsapp');
   const { state, saveCreds } = await useMultiFileAuthState(authFolder);
-  const { version } = await fetchLatestBaileysVersion();
+  const { version } = await fetchLatestBaileysVersion().catch(() => ({ version: [2, 3000, 1015901307] }));
 
   waSocket = makeWASocket({
     version,
     auth: state,
     logger: pino({ level: 'silent' }),
-    printQRInTerminal: false
+    printQRInTerminal: false,
+    connectTimeoutMs: 60000,
+    defaultQueryTimeoutMs: 60000,
+    keepAliveIntervalMs: 25000
   });
 
   waSocket.ev.on('creds.update', saveCreds);
@@ -102,22 +111,34 @@ async function startWhatsApp() {
     if (connection === 'close') {
       isConnected = false;
       const statusCode = lastDisconnect?.error?.output?.statusCode;
+      const errorMessage = lastDisconnect?.error?.message || lastDisconnect?.error;
       const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-      console.log(`اتصال واتساپ قطع شد. تلاش مجدد: ${shouldReconnect}`);
-      if (shouldReconnect) startWhatsApp();
+
+      console.log(`[WhatsApp] اتصال قطع شد | علت: ${errorMessage} | کد: ${statusCode || 'نامشخص'}`);
+
+      if (shouldReconnect) {
+        console.log('[WhatsApp] تلاش مجدد برای برقراری ارتباط تا ۶ ثانیه دیگر...');
+        reconnectTimer = setTimeout(() => {
+          startWhatsApp();
+        }, 6000);
+      } else {
+        console.log('[WhatsApp] نشست کاربر منقضی شده است (Logged Out). پوشه auth_whatsapp باید ریست شود.');
+      }
     } else if (connection === 'open') {
       isConnected = true;
-      console.log('واتساپ با موفقیت متصل شد و آماده ارسال پیام است.');
+      console.log('[WhatsApp] با موفقیت به واتساپ متصل شد و آماده دریافت درخواست است.');
     }
   });
 }
 
 startWhatsApp();
 
-// ۴. اندپوینت اختصاصی ارسال پیام و مدیا در واتساپ
+// ۴. اندپوینت ارسال پیام و مدیا در واتساپ
 app.post('/whatsapp/send', async (req, res) => {
   if (!isConnected || !waSocket) {
-    return res.status(503).json({ error: 'WhatsApp is not connected yet. Check server logs for QR code.' });
+    return res.status(503).json({ 
+      error: 'WhatsApp is not connected yet. Check server logs for QR code.' 
+    });
   }
 
   try {
