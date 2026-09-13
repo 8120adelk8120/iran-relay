@@ -4,44 +4,78 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const axios = require('axios');
-const pino = require('pino');
-const qrcode = require('qrcode-terminal');
-const { HttpsProxyAgent } = require('https-proxy-agent');
-const { 
-  default: makeWASocket, 
-  useMultiFileAuthState, 
-  DisconnectReason, 
-  fetchLatestBaileysVersion 
-} = require('@whiskeysockets/baileys');
 
 const app = express();
+
+// میدل‌ورهای پایه و افزایش سقف حجم بادی
 app.use(cors());
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: '100mb' }));
+app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 
-// ۱. مدیریت آپلود و سرو فایل‌ها
+// اطمینان از وجود پوشه uploads در مسیر پروژه
 const uploadDir = path.join(__dirname, 'uploads');
-if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir, { recursive: true });
+}
 
+// تنظیم ایمن ذخیره‌سازی فایل‌ها و مدیریت نام‌گذاری
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, uploadDir),
   filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname);
-    const name = `${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`;
-    cb(null, name);
+    let ext = '.jpg';
+    if (file && file.originalname && file.originalname.includes('.')) {
+      ext = path.extname(file.originalname);
+    } else if (file && file.mimetype) {
+      if (file.mimetype.includes('video')) ext = '.mp4';
+      else if (file.mimetype.includes('png')) ext = '.png';
+      else if (file.mimetype.includes('jpeg') || file.mimetype.includes('jpg')) ext = '.jpg';
+    }
+    const uniqueName = `${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`;
+    cb(null, uniqueName);
   }
 });
-const upload = multer({ storage });
 
-app.use('/uploads', express.static(uploadDir));
-
-app.post('/upload', upload.single('file'), (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-  const fullUrl = `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}`;
-  res.json({ url: fullUrl, filename: req.file.filename });
+const upload = multer({
+  storage,
+  limits: { fileSize: 100 * 1024 * 1024 } // سقف ۱۰۰ مگابایت برای ویدیو و عکس
 });
 
-// ۲. رله پیام‌رسان‌های بله و ایتا
+// دسترسی عمومی به فایل‌های آپلود شده
+app.use('/uploads', express.static(uploadDir));
+
+// اندپوینت بررسی سلامت سرور (جلوگیری از خطای ۴۰۴ روی ریشه)
+app.get('/', (req, res) => {
+  res.json({ status: 'running', service: 'Darkube Media & Messaging Relay' });
+});
+
+// اندپوینت آپلود امن ضد کرش
+app.post('/upload', (req, res) => {
+  upload.single('file')(req, res, (err) => {
+    if (err instanceof multer.MulterError) {
+      return res.status(400).json({ error: `Multer error: ${err.message}` });
+    } else if (err) {
+      return res.status(500).json({ error: `Upload error: ${err.message}` });
+    }
+
+    if (!req.file) {
+      return res.status(400).json({ error: 'هیچ فایلی با کلید "file" ارسال نشده است.' });
+    }
+
+    // ساخت آدرس کامل فایل با در نظر گرفتن پروکسی کلودفلر
+    const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+    const host = req.headers['x-forwarded-host'] || req.get('host');
+    const fullUrl = `${protocol}://${host}/uploads/${req.file.filename}`;
+
+    res.json({
+      success: true,
+      url: fullUrl,
+      filename: req.file.filename,
+      size: req.file.size
+    });
+  });
+});
+
+// رله پیام‌رسان بله
 app.all('/bale/*', async (req, res) => {
   try {
     const targetPath = req.params[0];
@@ -49,7 +83,9 @@ app.all('/bale/*', async (req, res) => {
       method: req.method,
       url: `https://tapi.bale.ai/${targetPath}`,
       data: req.body,
-      params: req.query
+      params: req.query,
+      headers: { 'Content-Type': 'application/json' },
+      timeout: 30000
     });
     res.status(response.status).json(response.data);
   } catch (err) {
@@ -57,6 +93,7 @@ app.all('/bale/*', async (req, res) => {
   }
 });
 
+// رله پیام‌رسان ایتا
 app.all('/eitaa/*', async (req, res) => {
   try {
     const targetPath = req.params[0];
@@ -64,7 +101,9 @@ app.all('/eitaa/*', async (req, res) => {
       method: req.method,
       url: `https://eitaayar.ir/${targetPath}`,
       data: req.body,
-      params: req.query
+      params: req.query,
+      headers: { 'Content-Type': 'application/json' },
+      timeout: 30000
     });
     res.status(response.status).json(response.data);
   } catch (err) {
@@ -72,102 +111,11 @@ app.all('/eitaa/*', async (req, res) => {
   }
 });
 
-// ۳. موتور واتساپ با پروکسی پورت 8443 و کنترل ریکانکت
-let waSocket = null;
-let isConnected = false;
-let reconnectTimer = null;
-
-async function startWhatsApp() {
-  if (reconnectTimer) {
-    clearTimeout(reconnectTimer);
-    reconnectTimer = null;
-  }
-
-  const authFolder = path.join(__dirname, 'auth_whatsapp');
-  const { state, saveCreds } = await useMultiFileAuthState(authFolder);
-  const { version } = await fetchLatestBaileysVersion().catch(() => ({ version: [2, 3000, 1015901307] }));
-
-  // عبور ترافیک واتساپ از پورت 8443 سرور خارج
-  const proxyAgent = new HttpsProxyAgent('http://31.58.179.16:8443');
-
-  waSocket = makeWASocket({
-    version,
-    auth: state,
-    agent: proxyAgent,
-    logger: pino({ level: 'silent' }),
-    printQRInTerminal: false,
-    connectTimeoutMs: 60000,
-    defaultQueryTimeoutMs: 60000,
-    keepAliveIntervalMs: 25000
-  });
-
-  waSocket.ev.on('creds.update', saveCreds);
-
-  waSocket.ev.on('connection.update', (update) => {
-    const { connection, lastDisconnect, qr } = update;
-
-    if (qr) {
-      console.log('\n================ QR CODE WHATSAPP ================');
-      qrcode.generate(qr, { small: true });
-      console.log('لطفاً بارکد بالا را با واتساپ گوشی اسکن کنید');
-      console.log('===================================================\n');
-    }
-
-    if (connection === 'close') {
-      isConnected = false;
-      const statusCode = lastDisconnect?.error?.output?.statusCode;
-      const errorMessage = lastDisconnect?.error?.message || lastDisconnect?.error;
-      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-
-      console.log(`[WhatsApp] اتصال قطع شد | علت: ${errorMessage} | کد: ${statusCode || 'نامشخص'}`);
-
-      if (shouldReconnect) {
-        console.log('[WhatsApp] تلاش مجدد برای برقراری ارتباط تا ۶ ثانیه دیگر...');
-        reconnectTimer = setTimeout(() => {
-          startWhatsApp();
-        }, 6000);
-      } else {
-        console.log('[WhatsApp] نشست کاربری منقضی شد (Logged Out). پوشه auth_whatsapp باید ریست شود.');
-      }
-    } else if (connection === 'open') {
-      isConnected = true;
-      console.log('[WhatsApp] با موفقیت به واتساپ متصل شد و آماده دریافت درخواست است.');
-    }
-  });
-}
-
-startWhatsApp();
-
-// ۴. اندپوینت اختصاصی ارسال پیام و مدیا در واتساپ
-app.post('/whatsapp/send', async (req, res) => {
-  if (!isConnected || !waSocket) {
-    return res.status(503).json({ 
-      error: 'WhatsApp is not connected yet. Check server logs for QR code.' 
-    });
-  }
-
-  try {
-    let { number, text, mediaUrl, mediaType, caption } = req.body;
-    if (!number) return res.status(400).json({ error: 'Field "number" is required' });
-
-    let jid = number.includes('@') ? number : `${number.replace(/[^0-9]/g, '')}@s.whatsapp.net`;
-    let result;
-
-    if (mediaUrl) {
-      if (mediaType === 'video') {
-        result = await waSocket.sendMessage(jid, { video: { url: mediaUrl }, caption: caption || text || '' });
-      } else {
-        result = await waSocket.sendMessage(jid, { image: { url: mediaUrl }, caption: caption || text || '' });
-      }
-    } else {
-      result = await waSocket.sendMessage(jid, { text: text || '' });
-    }
-
-    res.json({ success: true, messageId: result.key.id });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
+// میدل‌ور سراسری مدیریت خطا برای جلوگیری از داون شدن سرور
+app.use((err, req, res, next) => {
+  console.error('[Global Error]:', err);
+  res.status(500).json({ error: err.message || 'Internal Server Error' });
 });
 
 const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.listen(PORT, '0.0.0.0', () => console.log(`Darkube Relay running on port ${PORT}`));
