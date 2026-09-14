@@ -4,21 +4,22 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const axios = require('axios');
+const crypto = require('crypto');
 
 const app = express();
 
-// میدل‌ورهای پایه و افزایش محدودیت حجم درخواست‌ها
+// تنظیم میدل‌ورها و سقف ترافیک بادی (۱۰۰ مگابایت برای فایل‌های ویدیویی)
 app.use(cors());
 app.use(express.json({ limit: '100mb' }));
 app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 
-// اطمینان از وجود پوشه uploads در مسیر محلی پروژه
+// اطمینان از وجود پوشه محلی ذخیره‌سازی فایل‌ها
 const uploadDir = path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
 }
 
-// تنظیم ذخیره‌سازی ایمن فایل‌ها با Multer
+// تنظیم ذخیره‌سازی فایل‌ها با پسوندهای امن و استاندارد
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, uploadDir),
   filename: (req, file, cb) => {
@@ -37,18 +38,18 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage,
-  limits: { fileSize: 100 * 1024 * 1024 } // سقف ۱۰۰ مگابایت برای ویدیو و تصاویر
+  limits: { fileSize: 100 * 1024 * 1024 }
 });
 
-// دسترسی مستقیم مرورگر و وب‌سرویس‌ها به فایل‌های آپلود شده
+// دسترسی مستقیم به فایل‌های آپلود شده
 app.use('/uploads', express.static(uploadDir));
 
-// اندپوینت تست سلامت سرور
+// اندپوینت بررسی سلامت سرور
 app.get('/', (req, res) => {
-  res.json({ status: 'running', service: 'Darkube Media & Messaging Relay' });
+  res.json({ status: 'running', service: 'Darkube Media, Messaging & Aparat Relay' });
 });
 
-// اندپوینت آپلود فایل مقاوم در برابر خطای ۵۰۲
+// اندپوینت آپلود ایمن رسانه‌ها
 app.post('/upload', (req, res) => {
   upload.single('file')(req, res, (err) => {
     if (err instanceof multer.MulterError) {
@@ -93,19 +94,18 @@ app.all('/bale/*', async (req, res) => {
   }
 });
 
-// رله هوشمند ایتا (تبدیل خودکار لینک URL به فایل آپلودی چندبخشی multipart/form-data)
+// رله هوشمند ایتا (تبدیل URL به فایل باینری فرمت FormData)
 app.all('/eitaa/*', async (req, res) => {
   try {
     const targetPath = req.params[0];
     const targetUrl = `https://eitaayar.ir/${targetPath}`;
 
-    // بررسی درخواست ارسال فایل حاوی URL
     if (targetPath.includes('sendFile') && req.body && req.body.file) {
       let fileBuffer = null;
       let fileName = 'file.jpg';
       const fileUrl = req.body.file;
 
-      // ۱. اگر فایل قبلاً روی همین سرور آپلود شده، مستقیم از حافظه دیسک خوانده شود
+      // خواندن فایل از حافظه محلی در صورت آپلود پیشین روی همین سرور
       if (typeof fileUrl === 'string' && fileUrl.includes('/uploads/')) {
         const localFileName = fileUrl.split('/uploads/')[1].split('?')[0];
         const localFilePath = path.join(uploadDir, localFileName);
@@ -115,7 +115,7 @@ app.all('/eitaa/*', async (req, res) => {
         }
       }
 
-      // ۲. در غیر این صورت، فایل از اینترنت دانلود و تبدیل به بافر شود
+      // دانلود مستقیم در صورت وجود لینک خارجی
       if (!fileBuffer && typeof fileUrl === 'string' && fileUrl.startsWith('http')) {
         const downloadRes = await axios.get(fileUrl, { responseType: 'arraybuffer', timeout: 45000 });
         fileBuffer = downloadRes.data;
@@ -125,7 +125,6 @@ app.all('/eitaa/*', async (req, res) => {
         } catch (_) {}
       }
 
-      // ۳. ساخت بسته استاندارد FormData برای API ایتا
       if (fileBuffer) {
         const formData = new FormData();
         formData.append('chat_id', req.body.chat_id);
@@ -145,7 +144,6 @@ app.all('/eitaa/*', async (req, res) => {
       }
     }
 
-    // درخواست‌های متنی معمول (مانند sendMessage)
     const response = await axios({
       method: req.method,
       url: targetUrl,
@@ -161,11 +159,81 @@ app.all('/eitaa/*', async (req, res) => {
   }
 });
 
-// میدل‌ور سراسری برای جلوگیری از کرش سرور
+// رله آپلود ویدیو به آپارات
+app.post('/aparat/upload', async (req, res) => {
+  try {
+    const { username, password, ltoken, videoUrl, title, description, category, tags } = req.body;
+    let token = ltoken;
+
+    // ورود به آپارات در صورت عدم ارسال توکن مستقیم
+    if (!token && username && password) {
+      const hashPass = crypto.createHash('md5').update(password).digest('hex');
+      const loginRes = await axios.get(`https://www.aparat.com/etc/api/login/luser/${username}/lpass/${hashPass}`);
+      if (loginRes.data?.login?.type !== 'success') {
+        return res.status(401).json({ error: 'خطا در ورود به آپارات: نام کاربری یا رمز عبور نامعتبر است.' });
+      }
+      token = loginRes.data.login.ltoken;
+    }
+
+    if (!token || !username) {
+      return res.status(400).json({ error: 'نام کاربری و توکن/رمز عبور آپارات ارسال نشده است.' });
+    }
+
+    // دریافت آدرس و فرم آپلود موقت آپارات
+    const formRes = await axios.get(`https://www.aparat.com/etc/api/uploadform/luser/${username}/ltoken/${token}`);
+    const uploadData = formRes.data?.uploadform;
+    if (!uploadData || !uploadData.formAction) {
+      return res.status(500).json({ error: 'عدم موفقیت در دریافت فرم آپلود از آپارات', details: formRes.data });
+    }
+
+    // بازخوانی فایل ویدیویی از حافظه لوکال یا دانلود لینک
+    let fileBuffer = null;
+    let fileName = 'video.mp4';
+    if (videoUrl && videoUrl.includes('/uploads/')) {
+      const localFileName = videoUrl.split('/uploads/')[1].split('?')[0];
+      const localFilePath = path.join(uploadDir, localFileName);
+      if (fs.existsSync(localFilePath)) {
+        fileBuffer = fs.readFileSync(localFilePath);
+        fileName = localFileName;
+      }
+    }
+    if (!fileBuffer && videoUrl) {
+      const downloadRes = await axios.get(videoUrl, { responseType: 'arraybuffer', timeout: 60000 });
+      fileBuffer = downloadRes.data;
+    }
+
+    if (!fileBuffer) {
+      return res.status(400).json({ error: 'فایل ویدیو برای ارسال به آپارات یافت نشد.' });
+    }
+
+    // ساخت بسته استاندارد FormData برای سرور آپارات
+    const formData = new FormData();
+    const blob = new Blob([fileBuffer]);
+    formData.append('video', blob, fileName);
+    formData.append('frm-id', uploadData['frm-id']);
+    formData.append('title', title || 'ویدیو جدید');
+    formData.append('category', category || '7');
+    formData.append('description', description || '');
+    formData.append('tags', tags || 'خلاقیت,نوآوری,کسب_و_کار');
+
+    const aparatRes = await fetch(uploadData.formAction, {
+      method: 'POST',
+      body: formData
+    });
+
+    const result = await aparatRes.json();
+    res.json({ success: true, aparatResponse: result });
+  } catch (err) {
+    console.error('[Aparat Relay Error]:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// میدل‌ور سراسری مدیریت خطا
 app.use((err, req, res, next) => {
   console.error('[Global Handler]:', err);
   res.status(500).json({ error: err.message || 'Internal Server Error' });
 });
 
 const PORT = process.env.PORT || 8080;
-app.listen(PORT, '0.0.0.0', () => console.log(`Darkube Relay Service running on port ${PORT}`));
+app.listen(PORT, '0.0.0.0', () => console.log(`Darkube Relay running on port ${PORT}`));
