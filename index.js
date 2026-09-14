@@ -123,7 +123,7 @@ app.post('/video/render', async (req, res) => {
         ${tspans}
       </text>
       <text x="540" y="${boxY + boxHeight - 22}" font-size="20" font-family="'Noto Sans Arabic', Tahoma, Arial, sans-serif" fill="#94a3b8" text-anchor="middle" direction="rtl">
-        اتاق بین‌المللی نوآوری و خلاقیت
+        اتاق بین الملل خلاقیت و نوآوری
       </text>
     </svg>`;
 
