@@ -7,31 +7,36 @@ const axios = require('axios');
 const crypto = require('crypto');
 const { execFile } = require('child_process');
 
+// بارگذاری ایمن sharp در صورت در دسترس بودن
 let sharp = null;
 try {
   sharp = require('sharp');
 } catch (_) {
-  console.warn('[Warning]: sharp is not loaded. SVG will be used directly.');
+  console.warn('[Warning]: sharp is not loaded. Falling back to direct SVG.');
 }
 
 const app = express();
 
+// تنظیمات میدل‌ورها و حجم مجاز داده‌ها
 app.use(cors());
 app.use(express.json({ limit: '100mb' }));
 app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 
+// پوشه ذخیره‌سازی فایل‌های آپلود شده و خروجی‌ها
 const uploadDir = path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
 }
-
 app.use('/uploads', express.static(uploadDir));
 
+// تست وضعیت سرور
 app.get('/', (req, res) => {
   res.json({ status: 'running', service: 'Darkube Media & FFmpeg Native Video Engine' });
 });
 
-// ۱. اندپوینت آپلود مدیا
+// ==========================================
+// ۱. اندپوینت آپلود مدیا (عکس و ویدیو)
+// ==========================================
 app.post('/upload', (req, res) => {
   const storage = multer.diskStorage({
     destination: (req, file, cb) => cb(null, uploadDir),
@@ -62,7 +67,7 @@ app.post('/upload', (req, res) => {
   });
 });
 
-// تابع کمکی تنظیم شکست خطوط متن فارسی
+// تابع کمکی شکست هوشمند خطوط فارسی
 function wrapPersianText(text, maxChars = 32) {
   const words = (text || '').trim().split(/\s+/);
   const lines = [];
@@ -79,12 +84,15 @@ function wrapPersianText(text, maxChars = 32) {
   return lines.slice(0, 3);
 }
 
-// ۲. اندپوینت سبک و بهینه رندر ویدیو با FFmpeg بومی
+// ==========================================
+// ۲. اندپوینت سبک و ضدکرش رندر ویدیو با FFmpeg
+// ==========================================
 app.post('/video/render', async (req, res) => {
   try {
-    const { imageUrl, text, duration = 5 } = req.body;
+    const { imageUrl, text, duration = 5, footer } = req.body;
     if (!imageUrl) return res.status(400).json({ error: 'آدرس تصویر ارسال نشده است.' });
 
+    // واکشی باینری تصویر پس‌زمینه
     let bgBuffer = null;
     if (imageUrl.includes('/uploads/')) {
       const localPath = path.join(uploadDir, imageUrl.split('/uploads/')[1].split('?')[0]);
@@ -103,11 +111,12 @@ app.post('/video/render', async (req, res) => {
 
     fs.writeFileSync(tempBgPath, bgBuffer);
 
-    // ساخت گرافیک عنوان فارسی با کادر شیشه‌ای تیره
+    // ساخت کاور شیشه‌ای عنوان فارسی با SVG
     const lines = wrapPersianText(text || 'نوآوری و خلاقیت در کسب‌وکار');
     const tspans = lines.map((l, i) => `<tspan x="540" dy="${i === 0 ? 0 : 54}">${l}</tspan>`).join('');
     const boxHeight = 150 + lines.length * 45;
     const boxY = 1020 - boxHeight;
+    const footerText = footer || 'اتاق بین‌المللی نوآوری و خلاقیت';
 
     const svgOverlay = `
     <svg width="1080" height="1080" viewBox="0 0 1080 1080" xmlns="http://www.w3.org/2000/svg">
@@ -123,7 +132,7 @@ app.post('/video/render', async (req, res) => {
         ${tspans}
       </text>
       <text x="540" y="${boxY + boxHeight - 22}" font-size="20" font-family="'Noto Sans Arabic', Tahoma, Arial, sans-serif" fill="#94a3b8" text-anchor="middle" direction="rtl">
-        اتاق بین الملل خلاقیت و نوآوری
+        ${footerText}
       </text>
     </svg>`;
 
@@ -133,7 +142,7 @@ app.post('/video/render', async (req, res) => {
       fs.writeFileSync(tempOverlayPath, Buffer.from(svgOverlay));
     }
 
-    // ساخت دستور FFmpeg بهینه (مصرف رم زیر ۵۰ مگابایت)
+    // پارامترهای کم‌مصرف FFmpeg (استفاده از نسخه بومی نصب‌شده روی داکر)
     const args = [
       '-y',
       '-loop', '1', '-t', `${duration}`, '-i', tempBgPath,
@@ -175,7 +184,9 @@ app.post('/video/render', async (req, res) => {
   }
 });
 
+// ==========================================
 // ۳. رله پیام‌رسان بله
+// ==========================================
 app.all('/bale/*', async (req, res) => {
   try {
     const r = await axios({
@@ -192,36 +203,62 @@ app.all('/bale/*', async (req, res) => {
   }
 });
 
-// ۴. رله هوشمند ایتا (تبدیل URL به FormData)
+// ==========================================
+// ۴. رله هوشمند ایتا (با تشخیص خودکار پسوند و نوع فایل)
+// ==========================================
 app.all('/eitaa/*', async (req, res) => {
   try {
     const targetUrl = `https://eitaayar.ir/${req.params[0]}`;
+
     if (req.params[0].includes('sendFile') && req.body && req.body.file) {
       let fileBuffer = null;
-      let fileName = 'file.jpg';
       const fileUrl = req.body.file;
+      let fileName = 'file.mp4';
 
-      if (typeof fileUrl === 'string' && fileUrl.includes('/uploads/')) {
-        const localPath = path.join(uploadDir, fileUrl.split('/uploads/')[1].split('?')[0]);
-        if (fs.existsSync(localPath)) fileBuffer = fs.readFileSync(localPath);
+      // ۱. استخراج نام و پسوند واقعی فایل از URL
+      if (typeof fileUrl === 'string') {
+        const cleanName = path.basename(fileUrl.split('?')[0]);
+        if (cleanName && cleanName.includes('.')) {
+          fileName = cleanName;
+        }
       }
+
+      // ۲. خواندن مستقیم از لوکال در صورت وجود در پوشه uploads
+      if (typeof fileUrl === 'string' && fileUrl.includes('/uploads/')) {
+        const localPath = path.join(uploadDir, fileName);
+        if (fs.existsSync(localPath)) {
+          fileBuffer = fs.readFileSync(localPath);
+        }
+      }
+
+      // ۳. دانلود بافر فایل در صورت لینک خارجی
       if (!fileBuffer && typeof fileUrl === 'string' && fileUrl.startsWith('http')) {
-        const d = await axios.get(fileUrl, { responseType: 'arraybuffer', timeout: 45000 });
+        const d = await axios.get(fileUrl, { responseType: 'arraybuffer', timeout: 60000 });
         fileBuffer = d.data;
       }
 
       if (fileBuffer) {
+        // ۴. تنظیم دقیق MIME Type متناسب با پسوند
+        let mimeType = 'application/octet-stream';
+        const ext = path.extname(fileName).toLowerCase();
+        if (ext === '.mp4') mimeType = 'video/mp4';
+        else if (ext === '.jpg' || ext === '.jpeg') mimeType = 'image/jpeg';
+        else if (ext === '.png') mimeType = 'image/png';
+        else if (ext === '.mp3') mimeType = 'audio/mpeg';
+
         const formData = new FormData();
         formData.append('chat_id', req.body.chat_id);
         if (req.body.caption) formData.append('caption', req.body.caption);
         if (req.body.title) formData.append('title', req.body.title);
-        formData.append('file', new Blob([fileBuffer]), fileName);
+        formData.append('file', new Blob([fileBuffer], { type: mimeType }), fileName);
 
         const eitaaRes = await fetch(targetUrl, { method: 'POST', body: formData });
-        return res.status(eitaaRes.status).json(await eitaaRes.json());
+        const result = await eitaaRes.json();
+        return res.status(eitaaRes.status).json(result);
       }
     }
 
+    // ارسال سایر متدهای متنی
     const r = await axios({ method: req.method, url: targetUrl, data: req.body, timeout: 45000 });
     res.status(r.status).json(r.data);
   } catch (err) {
@@ -229,25 +266,51 @@ app.all('/eitaa/*', async (req, res) => {
   }
 });
 
+// ==========================================
 // ۵. رله آپلود ویدیو به آپارات
+// ==========================================
 app.post('/aparat/upload', async (req, res) => {
   try {
-    const { username, password, ltoken, videoUrl, title, description, category, tags } = req.body;
-    let token = ltoken;
+    const { token, ltoken, username, password, videoUrl, title, description, category, tags } = req.body;
+    let authToken = (token || ltoken || '').replace('Bearer ', '').trim();
 
-    if (!token && username && password) {
-      const hashPass = crypto.createHash('md5').update(password).digest('hex');
-      const loginRes = await axios.get(`https://www.aparat.com/etc/api/login/luser/${username}/lpass/${hashPass}`);
-      if (loginRes.data?.login?.type !== 'success') {
-        return res.status(401).json({ error: 'نام کاربری یا رمز عبور آپارات نامعتبر است.' });
-      }
-      token = loginRes.data.login.ltoken;
+    // ورود از طریق نام کاربری و رمز در صورت عدم ارسال توکن مستقیم
+    if (!authToken && username && password) {
+      try {
+        const hashPass = crypto.createHash('md5').update(password).digest('hex');
+        const loginRes = await axios.get(`https://www.aparat.com/etc/api/login/luser/${username}/lpass/${hashPass}`);
+        if (loginRes.data?.login?.ltoken) {
+          authToken = loginRes.data.login.ltoken;
+        }
+      } catch (_) {}
     }
 
-    const formRes = await axios.get(`https://www.aparat.com/etc/api/uploadform/luser/${username}/ltoken/${token}`);
-    const uploadData = formRes.data?.uploadform;
-    if (!uploadData?.formAction) return res.status(500).json({ error: 'خطا در دریافت فرم آپلود آپارات' });
+    if (!authToken) {
+      return res.status(400).json({ error: 'توکن دسترسی معتبر آپارات ارسال نشده است.' });
+    }
 
+    // دریافت فرم مجاز آپلود
+    let formAction = null;
+    let frmId = null;
+
+    try {
+      const modernForm = await axios.get('https://api.aparat.com/fa/v1/video/video/upload_form', {
+        headers: { Authorization: `Bearer ${authToken}` },
+        timeout: 20000
+      });
+      formAction = modernForm.data?.data?.attributes?.formAction || modernForm.data?.uploadform?.formAction;
+      frmId = modernForm.data?.data?.attributes?.['frm-id'] || modernForm.data?.uploadform?.['frm-id'];
+    } catch (_) {
+      const legacyForm = await axios.get(`https://www.aparat.com/etc/api/uploadform/luser/user/ltoken/${authToken}`);
+      formAction = legacyForm.data?.uploadform?.formAction;
+      frmId = legacyForm.data?.uploadform?.['frm-id'];
+    }
+
+    if (!formAction || !frmId) {
+      return res.status(401).json({ error: 'امکان دریافت فرم آپلود وجود ندارد. توکن آپارات را بررسی کنید.' });
+    }
+
+    // دریافت فایل ویدیو
     let fileBuffer = null;
     if (videoUrl && videoUrl.includes('/uploads/')) {
       const localPath = path.join(uploadDir, videoUrl.split('/uploads/')[1].split('?')[0]);
@@ -258,24 +321,27 @@ app.post('/aparat/upload', async (req, res) => {
       fileBuffer = d.data;
     }
 
-    if (!fileBuffer) return res.status(400).json({ error: 'فایل ویدیو یافت نشد.' });
+    if (!fileBuffer) return res.status(400).json({ error: 'فایل باینری ویدیو یافت نشد.' });
 
     const formData = new FormData();
-    formData.append('video', new Blob([fileBuffer]), 'video.mp4');
-    formData.append('frm-id', uploadData['frm-id']);
+    formData.append('video', new Blob([fileBuffer], { type: 'video/mp4' }), 'video.mp4');
+    formData.append('frm-id', frmId);
     formData.append('title', title || 'ویدیو جدید');
     formData.append('category', category || '7');
     formData.append('description', description || '');
     formData.append('tags', tags || 'خلاقیت,نوآوری,کسب_و_کار');
 
-    const aparatRes = await fetch(uploadData.formAction, { method: 'POST', body: formData });
+    const aparatRes = await fetch(formAction, { method: 'POST', body: formData });
     res.json({ success: true, aparatResponse: await aparatRes.json() });
   } catch (err) {
+    console.error('[Aparat Upload Error]:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
 
-// ۶. میدل‌ور سراسری مدیریت خطا
+// ==========================================
+// ۶. مدیریت خطاهای سراسری
+// ==========================================
 app.use((err, req, res, next) => {
   console.error('[Global Handler]:', err);
   res.status(500).json({ error: err.message || 'Internal Server Error' });
