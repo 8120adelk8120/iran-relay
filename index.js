@@ -7,35 +7,34 @@ const axios = require('axios');
 const crypto = require('crypto');
 const { execFile } = require('child_process');
 
-// بارگذاری ایمن sharp در صورت در دسترس بودن
+// بارگذاری ایمن ماژول پردازش تصویر Sharp
 let sharp = null;
 try {
   sharp = require('sharp');
 } catch (_) {
-  console.warn('[Warning]: sharp is not loaded. Falling back to direct SVG.');
+  console.warn('[Warning]: Sharp library not loaded. Falling back to raw SVG.');
 }
 
 const app = express();
 
-// تنظیمات میدل‌ورها و حجم مجاز داده‌ها
 app.use(cors());
 app.use(express.json({ limit: '100mb' }));
 app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 
-// پوشه ذخیره‌سازی فایل‌های آپلود شده و خروجی‌ها
+// دایرکتوری ذخیره‌سازی فایل‌های رسانه‌ای
 const uploadDir = path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
 }
 app.use('/uploads', express.static(uploadDir));
 
-// تست وضعیت سرور
+// بررسی سلامت سرویس
 app.get('/', (req, res) => {
-  res.json({ status: 'running', service: 'Darkube Media & FFmpeg Native Video Engine' });
+  res.json({ status: 'running', service: 'Darkube Media & Motion Video Engine' });
 });
 
 // ==========================================
-// ۱. اندپوینت آپلود مدیا (عکس و ویدیو)
+// ۱. آپلود فایل مدیا (تصویر و ویدیو)
 // ==========================================
 app.post('/upload', (req, res) => {
   const storage = multer.diskStorage({
@@ -55,7 +54,7 @@ app.post('/upload', (req, res) => {
   const upload = multer({ storage, limits: { fileSize: 100 * 1024 * 1024 } }).single('file');
   upload(req, res, (err) => {
     if (err) return res.status(500).json({ error: err.message });
-    if (!req.file) return res.status(400).json({ error: 'هیچ فایلی با کلید "file" ارسال نشده است.' });
+    if (!req.file) return res.status(400).json({ error: 'هیچ فایلی با کلید file دریافت نشد.' });
 
     const protocol = req.headers['x-forwarded-proto'] || req.protocol;
     const host = req.headers['x-forwarded-host'] || req.get('host');
@@ -67,7 +66,7 @@ app.post('/upload', (req, res) => {
   });
 });
 
-// تابع کمکی شکست هوشمند خطوط فارسی
+// ساختاردهی خطوط متن فارسی برای کارت تایتل
 function wrapPersianText(text, maxChars = 32) {
   const words = (text || '').trim().split(/\s+/);
   const lines = [];
@@ -85,14 +84,14 @@ function wrapPersianText(text, maxChars = 32) {
 }
 
 // ==========================================
-// ۲. اندپوینت سبک و ضدکرش رندر ویدیو با FFmpeg
+// ۲. رندر ویدیو موشن‌دار FFmpeg (ضد کرش و کم‌مصرف)
 // ==========================================
 app.post('/video/render', async (req, res) => {
   try {
     const { imageUrl, text, duration = 5, footer } = req.body;
     if (!imageUrl) return res.status(400).json({ error: 'آدرس تصویر ارسال نشده است.' });
 
-    // واکشی باینری تصویر پس‌زمینه
+    // دریافت داده باینری عکس پس‌زمینه
     let bgBuffer = null;
     if (imageUrl.includes('/uploads/')) {
       const localPath = path.join(uploadDir, imageUrl.split('/uploads/')[1].split('?')[0]);
@@ -111,7 +110,7 @@ app.post('/video/render', async (req, res) => {
 
     fs.writeFileSync(tempBgPath, bgBuffer);
 
-    // ساخت کاور شیشه‌ای عنوان فارسی با SVG
+    // ساخت گرافیک عنوان با شیشه مات تیره
     const lines = wrapPersianText(text || 'نوآوری و خلاقیت در کسب‌وکار');
     const tspans = lines.map((l, i) => `<tspan x="540" dy="${i === 0 ? 0 : 54}">${l}</tspan>`).join('');
     const boxHeight = 150 + lines.length * 45;
@@ -142,13 +141,15 @@ app.post('/video/render', async (req, res) => {
       fs.writeFileSync(tempOverlayPath, Buffer.from(svgOverlay));
     }
 
-    // پارامترهای کم‌مصرف FFmpeg (استفاده از نسخه بومی نصب‌شده روی داکر)
+    // افکت موشن نرم Ken Burns بدون افزایش مصرف رم
+    const filterComplex = `[0:v]scale=1200:1200,crop=1080:1080:(in_w-out_w)*(1-t/${duration}):(in_h-out_h)*(1-t/${duration})[bg];[bg][1:v]overlay=0:0[v]`;
+
     const args = [
       '-y',
       '-loop', '1', '-t', `${duration}`, '-i', tempBgPath,
       '-loop', '1', '-t', `${duration}`, '-i', tempOverlayPath,
       '-f', 'lavfi', '-t', `${duration}`, '-i', 'anullsrc=r=44100:cl=stereo',
-      '-filter_complex', '[0:v]scale=1080:1080:force_original_aspect_ratio=increase,crop=1080:1080[bg];[bg][1:v]overlay=0:0[v]',
+      '-filter_complex', filterComplex,
       '-map', '[v]',
       '-map', '2:a',
       '-c:v', 'libx264',
@@ -167,7 +168,7 @@ app.post('/video/render', async (req, res) => {
 
       if (err) {
         console.error('[FFmpeg Error]:', err.message);
-        return res.status(500).json({ error: 'خطای رندر FFmpeg', details: err.message });
+        return res.status(500).json({ error: 'خطای اجرای FFmpeg', details: err.message });
       }
 
       const protocol = req.headers['x-forwarded-proto'] || req.protocol;
@@ -204,7 +205,7 @@ app.all('/bale/*', async (req, res) => {
 });
 
 // ==========================================
-// ۴. رله هوشمند ایتا (با تشخیص خودکار پسوند و نوع فایل)
+// ۴. رله ایتا با تفکیک خودکار فرمت و پسوند
 // ==========================================
 app.all('/eitaa/*', async (req, res) => {
   try {
@@ -215,7 +216,6 @@ app.all('/eitaa/*', async (req, res) => {
       const fileUrl = req.body.file;
       let fileName = 'file.mp4';
 
-      // ۱. استخراج نام و پسوند واقعی فایل از URL
       if (typeof fileUrl === 'string') {
         const cleanName = path.basename(fileUrl.split('?')[0]);
         if (cleanName && cleanName.includes('.')) {
@@ -223,22 +223,17 @@ app.all('/eitaa/*', async (req, res) => {
         }
       }
 
-      // ۲. خواندن مستقیم از لوکال در صورت وجود در پوشه uploads
       if (typeof fileUrl === 'string' && fileUrl.includes('/uploads/')) {
         const localPath = path.join(uploadDir, fileName);
-        if (fs.existsSync(localPath)) {
-          fileBuffer = fs.readFileSync(localPath);
-        }
+        if (fs.existsSync(localPath)) fileBuffer = fs.readFileSync(localPath);
       }
 
-      // ۳. دانلود بافر فایل در صورت لینک خارجی
       if (!fileBuffer && typeof fileUrl === 'string' && fileUrl.startsWith('http')) {
         const d = await axios.get(fileUrl, { responseType: 'arraybuffer', timeout: 60000 });
         fileBuffer = d.data;
       }
 
       if (fileBuffer) {
-        // ۴. تنظیم دقیق MIME Type متناسب با پسوند
         let mimeType = 'application/octet-stream';
         const ext = path.extname(fileName).toLowerCase();
         if (ext === '.mp4') mimeType = 'video/mp4';
@@ -258,7 +253,6 @@ app.all('/eitaa/*', async (req, res) => {
       }
     }
 
-    // ارسال سایر متدهای متنی
     const r = await axios({ method: req.method, url: targetUrl, data: req.body, timeout: 45000 });
     res.status(r.status).json(r.data);
   } catch (err) {
@@ -274,7 +268,6 @@ app.post('/aparat/upload', async (req, res) => {
     const { token, ltoken, username, password, videoUrl, title, description, category, tags } = req.body;
     let authToken = (token || ltoken || '').replace('Bearer ', '').trim();
 
-    // ورود از طریق نام کاربری و رمز در صورت عدم ارسال توکن مستقیم
     if (!authToken && username && password) {
       try {
         const hashPass = crypto.createHash('md5').update(password).digest('hex');
@@ -286,10 +279,9 @@ app.post('/aparat/upload', async (req, res) => {
     }
 
     if (!authToken) {
-      return res.status(400).json({ error: 'توکن دسترسی معتبر آپارات ارسال نشده است.' });
+      return res.status(400).json({ error: 'توکن دسترسی آپارات (token) ارسال نشده است.' });
     }
 
-    // دریافت فرم مجاز آپلود
     let formAction = null;
     let frmId = null;
 
@@ -310,7 +302,6 @@ app.post('/aparat/upload', async (req, res) => {
       return res.status(401).json({ error: 'امکان دریافت فرم آپلود وجود ندارد. توکن آپارات را بررسی کنید.' });
     }
 
-    // دریافت فایل ویدیو
     let fileBuffer = null;
     if (videoUrl && videoUrl.includes('/uploads/')) {
       const localPath = path.join(uploadDir, videoUrl.split('/uploads/')[1].split('?')[0]);
@@ -321,7 +312,7 @@ app.post('/aparat/upload', async (req, res) => {
       fileBuffer = d.data;
     }
 
-    if (!fileBuffer) return res.status(400).json({ error: 'فایل باینری ویدیو یافت نشد.' });
+    if (!fileBuffer) return res.status(400).json({ error: 'فایل ویدیو یافت نشد.' });
 
     const formData = new FormData();
     formData.append('video', new Blob([fileBuffer], { type: 'video/mp4' }), 'video.mp4');
@@ -340,10 +331,10 @@ app.post('/aparat/upload', async (req, res) => {
 });
 
 // ==========================================
-// ۶. مدیریت خطاهای سراسری
+// ۶. میدل‌ور سراسری خطا
 // ==========================================
 app.use((err, req, res, next) => {
-  console.error('[Global Handler]:', err);
+  console.error('[Server Error]:', err);
   res.status(500).json({ error: err.message || 'Internal Server Error' });
 });
 
