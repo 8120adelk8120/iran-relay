@@ -7,15 +7,12 @@ const axios = require('axios');
 const crypto = require('crypto');
 const { execFile } = require('child_process');
 
-let ffmpegPath = 'ffmpeg';
-try {
-  ffmpegPath = require('ffmpeg-static') || 'ffmpeg';
-} catch (_) {}
-
 let sharp = null;
 try {
   sharp = require('sharp');
-} catch (_) {}
+} catch (_) {
+  console.warn('[Warning]: sharp is not loaded. SVG will be used directly.');
+}
 
 const app = express();
 
@@ -31,10 +28,10 @@ if (!fs.existsSync(uploadDir)) {
 app.use('/uploads', express.static(uploadDir));
 
 app.get('/', (req, res) => {
-  res.json({ status: 'running', service: 'Darkube Media & FFmpeg Video Engine' });
+  res.json({ status: 'running', service: 'Darkube Media & FFmpeg Native Video Engine' });
 });
 
-// اندپوینت آپلود مدیا
+// ۱. اندپوینت آپلود مدیا
 app.post('/upload', (req, res) => {
   const storage = multer.diskStorage({
     destination: (req, file, cb) => cb(null, uploadDir),
@@ -53,7 +50,7 @@ app.post('/upload', (req, res) => {
   const upload = multer({ storage, limits: { fileSize: 100 * 1024 * 1024 } }).single('file');
   upload(req, res, (err) => {
     if (err) return res.status(500).json({ error: err.message });
-    if (!req.file) return res.status(400).json({ error: 'فایلی ارسال نشد.' });
+    if (!req.file) return res.status(400).json({ error: 'هیچ فایلی با کلید "file" ارسال نشده است.' });
 
     const protocol = req.headers['x-forwarded-proto'] || req.protocol;
     const host = req.headers['x-forwarded-host'] || req.get('host');
@@ -65,7 +62,7 @@ app.post('/upload', (req, res) => {
   });
 });
 
-// تابع کمکی شکست خطوط متن فارسی برای جلوگیری از بیرون‌زدگی
+// تابع کمکی تنظیم شکست خطوط متن فارسی
 function wrapPersianText(text, maxChars = 32) {
   const words = (text || '').trim().split(/\s+/);
   const lines = [];
@@ -82,17 +79,15 @@ function wrapPersianText(text, maxChars = 32) {
   return lines.slice(0, 3);
 }
 
-// اندپوینت اختصاصی رندر ویدیو با FFmpeg (جایگزین کامل کریتومیت)
+// ۲. اندپوینت سبک و بهینه رندر ویدیو با FFmpeg بومی
 app.post('/video/render', async (req, res) => {
   try {
     const { imageUrl, text, duration = 5 } = req.body;
     if (!imageUrl) return res.status(400).json({ error: 'آدرس تصویر ارسال نشده است.' });
 
-    // ۱. دریافت فایل تصویر پس‌زمینه
     let bgBuffer = null;
     if (imageUrl.includes('/uploads/')) {
-      const localName = imageUrl.split('/uploads/')[1].split('?')[0];
-      const localPath = path.join(uploadDir, localName);
+      const localPath = path.join(uploadDir, imageUrl.split('/uploads/')[1].split('?')[0]);
       if (fs.existsSync(localPath)) bgBuffer = fs.readFileSync(localPath);
     }
     if (!bgBuffer) {
@@ -101,37 +96,33 @@ app.post('/video/render', async (req, res) => {
     }
 
     const tempId = `${Date.now()}-${Math.round(Math.random() * 1e6)}`;
-    const tempBgPath = path.join(uploadDir, `temp_bg_${tempId}.jpg`);
-    const tempOverlayPath = path.join(uploadDir, `temp_overlay_${tempId}.png`);
+    const tempBgPath = path.join(uploadDir, `bg_${tempId}.jpg`);
+    const tempOverlayPath = path.join(uploadDir, `ov_${tempId}.png`);
     const outputVideoName = `video_${tempId}.mp4`;
     const outputVideoPath = path.join(uploadDir, outputVideoName);
 
     fs.writeFileSync(tempBgPath, bgBuffer);
 
-    // ۲. ساخت کارت گرافیکی عنوان فارسی با SVG
+    // ساخت گرافیک عنوان فارسی با کادر شیشه‌ای تیره
     const lines = wrapPersianText(text || 'نوآوری و خلاقیت در کسب‌وکار');
-    const tspans = lines
-      .map((line, idx) => `<tspan x="540" dy="${idx === 0 ? 0 : 58}">${line}</tspan>`)
-      .join('');
-
-    const boxHeight = 160 + lines.length * 45;
-    const boxY = 1000 - boxHeight;
+    const tspans = lines.map((l, i) => `<tspan x="540" dy="${i === 0 ? 0 : 54}">${l}</tspan>`).join('');
+    const boxHeight = 150 + lines.length * 45;
+    const boxY = 1020 - boxHeight;
 
     const svgOverlay = `
     <svg width="1080" height="1080" viewBox="0 0 1080 1080" xmlns="http://www.w3.org/2000/svg">
       <defs>
-        <linearGradient id="bgGrad" x1="0%" y1="0%" x2="0%" y2="100%">
-          <stop offset="0%" stop-color="#000000" stop-opacity="0" />
-          <stop offset="60%" stop-color="#000000" stop-opacity="0.6" />
-          <stop offset="100%" stop-color="#000000" stop-opacity="0.95" />
+        <linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#000000" stop-opacity="0"/>
+          <stop offset="100%" stop-color="#000000" stop-opacity="0.9"/>
         </linearGradient>
       </defs>
-      <rect x="0" y="500" width="1080" height="580" fill="url(#bgGrad)" />
-      <rect x="70" y="${boxY}" width="940" height="${boxHeight}" rx="24" fill="#090d16" fill-opacity="0.88" stroke="#38bdf8" stroke-width="3" />
-      <text x="540" y="${boxY + 75}" font-size="42" font-family="Tahoma, Arial, sans-serif" font-weight="bold" fill="#ffffff" text-anchor="middle" direction="rtl">
+      <rect x="0" y="550" width="1080" height="530" fill="url(#g)"/>
+      <rect x="70" y="${boxY}" width="940" height="${boxHeight}" rx="20" fill="#0b0f19" fill-opacity="0.9" stroke="#38bdf8" stroke-width="2"/>
+      <text x="540" y="${boxY + 70}" font-size="38" font-family="'Noto Sans Arabic', Tahoma, Arial, sans-serif" font-weight="bold" fill="#ffffff" text-anchor="middle" direction="rtl">
         ${tspans}
       </text>
-      <text x="540" y="${boxY + boxHeight - 25}" font-size="22" font-family="Tahoma, Arial, sans-serif" fill="#94a3b8" text-anchor="middle" direction="rtl">
+      <text x="540" y="${boxY + boxHeight - 22}" font-size="20" font-family="'Noto Sans Arabic', Tahoma, Arial, sans-serif" fill="#94a3b8" text-anchor="middle" direction="rtl">
         اتاق بین‌المللی نوآوری و خلاقیت
       </text>
     </svg>`;
@@ -142,45 +133,39 @@ app.post('/video/render', async (req, res) => {
       fs.writeFileSync(tempOverlayPath, Buffer.from(svgOverlay));
     }
 
-    // ۳. دستور بهینه FFmpeg: موشن زوم سینمایی + قرارگیری تایتل + ساخت فایل MP4
-    const totalFrames = duration * 25;
-    const filterComplex = `[0:v]scale=1200:1200,zoompan=z='min(zoom+0.001,1.15)':d=${totalFrames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1080[bg];[bg][1:v]overlay=0:0[v]`;
-
+    // ساخت دستور FFmpeg بهینه (مصرف رم زیر ۵۰ مگابایت)
     const args = [
       '-y',
       '-loop', '1', '-t', `${duration}`, '-i', tempBgPath,
       '-loop', '1', '-t', `${duration}`, '-i', tempOverlayPath,
       '-f', 'lavfi', '-t', `${duration}`, '-i', 'anullsrc=r=44100:cl=stereo',
-      '-filter_complex', filterComplex,
+      '-filter_complex', '[0:v]scale=1080:1080:force_original_aspect_ratio=increase,crop=1080:1080[bg];[bg][1:v]overlay=0:0[v]',
       '-map', '[v]',
       '-map', '2:a',
       '-c:v', 'libx264',
-      '-preset', 'veryfast',
+      '-preset', 'ultrafast',
       '-pix_fmt', 'yuv420p',
       '-c:a', 'aac',
-      '-b:a', '128k',
       '-shortest',
       outputVideoPath
     ];
 
-    execFile(ffmpegPath, args, (err) => {
+    execFile('ffmpeg', args, (err) => {
       try {
         if (fs.existsSync(tempBgPath)) fs.unlinkSync(tempBgPath);
         if (fs.existsSync(tempOverlayPath)) fs.unlinkSync(tempOverlayPath);
       } catch (_) {}
 
       if (err) {
-        console.error('[FFmpeg Render Error]:', err.message);
-        return res.status(500).json({ error: 'خطا در رندر ویدیو با FFmpeg', details: err.message });
+        console.error('[FFmpeg Error]:', err.message);
+        return res.status(500).json({ error: 'خطای رندر FFmpeg', details: err.message });
       }
 
       const protocol = req.headers['x-forwarded-proto'] || req.protocol;
       const host = req.headers['x-forwarded-host'] || req.get('host');
-      const videoUrl = `${protocol}://${host}/uploads/${outputVideoName}`;
-
       res.json({
         success: true,
-        url: videoUrl,
+        url: `${protocol}://${host}/uploads/${outputVideoName}`,
         filename: outputVideoName
       });
     });
@@ -190,7 +175,7 @@ app.post('/video/render', async (req, res) => {
   }
 });
 
-// رله‌های پیام‌رسان‌ها و آپارات
+// ۳. رله پیام‌رسان بله
 app.all('/bale/*', async (req, res) => {
   try {
     const r = await axios({
@@ -207,6 +192,7 @@ app.all('/bale/*', async (req, res) => {
   }
 });
 
+// ۴. رله هوشمند ایتا (تبدیل URL به FormData)
 app.all('/eitaa/*', async (req, res) => {
   try {
     const targetUrl = `https://eitaayar.ir/${req.params[0]}`;
@@ -228,11 +214,14 @@ app.all('/eitaa/*', async (req, res) => {
         const formData = new FormData();
         formData.append('chat_id', req.body.chat_id);
         if (req.body.caption) formData.append('caption', req.body.caption);
+        if (req.body.title) formData.append('title', req.body.title);
         formData.append('file', new Blob([fileBuffer]), fileName);
+
         const eitaaRes = await fetch(targetUrl, { method: 'POST', body: formData });
         return res.status(eitaaRes.status).json(await eitaaRes.json());
       }
     }
+
     const r = await axios({ method: req.method, url: targetUrl, data: req.body, timeout: 45000 });
     res.status(r.status).json(r.data);
   } catch (err) {
@@ -240,6 +229,7 @@ app.all('/eitaa/*', async (req, res) => {
   }
 });
 
+// ۵. رله آپلود ویدیو به آپارات
 app.post('/aparat/upload', async (req, res) => {
   try {
     const { username, password, ltoken, videoUrl, title, description, category, tags } = req.body;
@@ -249,7 +239,7 @@ app.post('/aparat/upload', async (req, res) => {
       const hashPass = crypto.createHash('md5').update(password).digest('hex');
       const loginRes = await axios.get(`https://www.aparat.com/etc/api/login/luser/${username}/lpass/${hashPass}`);
       if (loginRes.data?.login?.type !== 'success') {
-        return res.status(401).json({ error: 'نام کاربری یا رمز عبور آپارات اشتباه است.' });
+        return res.status(401).json({ error: 'نام کاربری یا رمز عبور آپارات نامعتبر است.' });
       }
       token = loginRes.data.login.ltoken;
     }
@@ -268,6 +258,8 @@ app.post('/aparat/upload', async (req, res) => {
       fileBuffer = d.data;
     }
 
+    if (!fileBuffer) return res.status(400).json({ error: 'فایل ویدیو یافت نشد.' });
+
     const formData = new FormData();
     formData.append('video', new Blob([fileBuffer]), 'video.mp4');
     formData.append('frm-id', uploadData['frm-id']);
@@ -281,6 +273,12 @@ app.post('/aparat/upload', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// ۶. میدل‌ور سراسری مدیریت خطا
+app.use((err, req, res, next) => {
+  console.error('[Global Handler]:', err);
+  res.status(500).json({ error: err.message || 'Internal Server Error' });
 });
 
 const PORT = process.env.PORT || 8080;
