@@ -115,7 +115,7 @@ app.post('/video/render', async (req, res) => {
     const tspans = lines.map((l, i) => `<tspan x="540" dy="${i === 0 ? 0 : 54}">${l}</tspan>`).join('');
     const boxHeight = 150 + lines.length * 45;
     const boxY = 1020 - boxHeight;
-    const footerText = footer || 'اتاق بین‌المللی نوآوری و خلاقیت';
+    const footerText = footer || 'اتاق بین‌الملل خلاقیت و نوآوری';
 
     const svgOverlay = `
     <svg width="1080" height="1080" viewBox="0 0 1080 1080" xmlns="http://www.w3.org/2000/svg">
