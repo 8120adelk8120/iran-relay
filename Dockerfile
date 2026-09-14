@@ -2,12 +2,13 @@ FROM node:18-alpine
 
 WORKDIR /app
 
-# نصب ابزارهای مورد نیاز برای پکیج‌های شبکه و واتساپ
-RUN apk add --no-cache git python3 make g++
+# نصب ابزارهای بیلد، موتور بومی FFmpeg و فونت‌های استاندارد فارسی/عربی
+RUN apk add --no-cache git python3 make g++ ffmpeg font-noto-arabic ttf-dejavu
 
 COPY package*.json ./
 
-RUN npm install --omit=dev
+# نصب پکیج‌ها با فلگ legacy-peer-deps جهت حل تداخل sharp با کتابخانه واتساپ
+RUN npm install --omit=dev --legacy-peer-deps
 
 COPY . .
 
